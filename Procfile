@@ -1,0 +1,1 @@
+worker: python startup_idea_bot.py
