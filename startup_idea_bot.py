@@ -1,47 +1,69 @@
 import logging
 from groq import Groq
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    ConversationHandler, filters, ContextTypes
+    ConversationHandler, filters, ContextTypes, CallbackQueryHandler
 )
 from dotenv import load_dotenv
 import os
 import re
 import json
-
+ 
 load_dotenv()
-
+ 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-
+ 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@your_channel")
+ 
 USERS_FILE = "users.json"
 conversation_history = {}
-
+ 
 LANG, MENU, IDEA_FLOW = range(3)
-
+ 
 # ===================== USERS =====================
 def load_users() -> set:
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE, "r") as f:
             return set(json.load(f))
     return set()
-
+ 
 def save_user(user_id: int):
     users = load_users()
     users.add(user_id)
     with open(USERS_FILE, "w") as f:
         json.dump(list(users), f)
-
+ 
 def get_all_users() -> list:
     return list(load_users())
-
+ 
+# ===================== SUBSCRIPTION =====================
+async def check_subscription(user_id: int, bot) -> bool:
+    try:
+        member = await bot.get_chat_member(CHANNEL_USERNAME, user_id)
+        return member.status not in ["left", "kicked", "banned"]
+    except:
+        return False
+ 
+def get_sub_keyboard(lang: str):
+    channel = CHANNEL_USERNAME.replace("@", "")
+    if lang == "en":
+        btn1 = "📢 Subscribe to channel"
+        btn2 = "✅ I subscribed"
+    else:
+        btn1 = "📢 Kanalga obuna bo'lish"
+        btn2 = "✅ Obuna bo'ldim"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(btn1, url=f"https://t.me/{channel}")],
+        [InlineKeyboardButton(btn2, callback_data="check_sub")]
+    ])
+ 
 # ===================== AI =====================
 def clean_text(text: str) -> str:
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
@@ -51,7 +73,7 @@ def clean_text(text: str) -> str:
     text = re.sub(r'#{1,6}\s?', '', text)
     text = re.sub(r'`(.*?)`', r'\1', text)
     return text.strip()
-
+ 
 def get_system_prompt(lang: str) -> str:
     if lang == "en":
         return (
@@ -67,33 +89,33 @@ def get_system_prompt(lang: str) -> str:
             "MUHIM: Hech qachon ** __ * _ # ` belgilarini ishlatma. Faqat oddiy matn va emoji ishlat. "
             "Qisqa, amaliy va rag'batlantiruvchi bo'l."
         )
-
+ 
 def ask_ai(user_id: int, user_message: str, lang: str = "uz") -> str:
     client = Groq(api_key=GROQ_API_KEY)
     system = get_system_prompt(lang)
-
+ 
     if user_id not in conversation_history:
         conversation_history[user_id] = [{"role": "system", "content": system}]
     else:
         conversation_history[user_id][0] = {"role": "system", "content": system}
-
+ 
     conversation_history[user_id].append({"role": "user", "content": user_message})
-
+ 
     if len(conversation_history[user_id]) > 21:
         sys_msg = conversation_history[user_id][0]
         conversation_history[user_id] = [sys_msg] + conversation_history[user_id][-20:]
-
+ 
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=conversation_history[user_id],
         max_tokens=2048,
         temperature=0.7
     )
-
+ 
     reply = clean_text(response.choices[0].message.content)
     conversation_history[user_id].append({"role": "assistant", "content": reply})
     return reply
-
+ 
 def ask_ai_once(prompt: str, lang: str = "uz") -> str:
     client = Groq(api_key=GROQ_API_KEY)
     response = client.chat.completions.create(
@@ -106,7 +128,7 @@ def ask_ai_once(prompt: str, lang: str = "uz") -> str:
         temperature=0.7
     )
     return clean_text(response.choices[0].message.content)
-
+ 
 # ===================== TEXTS =====================
 TEXTS = {
     "uz": {
@@ -120,6 +142,9 @@ TEXTS = {
         "error": "⚠️ Xatolik yuz berdi. Qayta urinib ko'ring.",
         "reset_done": "🔄 Suhbat tozalandi!",
         "next_action": "Keyingi amalni tanlang:",
+        "sub_required": "⚠️ Botdan foydalanish uchun avval kanalimizga obuna bo'ling!\n\nObuna bo'lgach ✅ tugmasini bosing.",
+        "sub_success": "✅ Zo'r! Endi botdan foydalanishingiz mumkin.\n\n/start bosing.",
+        "sub_fail": "❌ Siz hali obuna bo'lmadingiz!",
         "help": "📖 Buyruqlar:\n\n/start - Botni boshlash\n/reset - Suhbatni tozalash\n/help - Yordam\n\nTugmalar:\n💡 Startup g'oya - 3 savol orqali idea\n📊 Tahlil - Ideangizni baholash\n🗺 Yo'l xaritasi - 6 oylik plan\n💬 Erkin suhbat - Istalgan savol",
     },
     "en": {
@@ -133,84 +158,111 @@ TEXTS = {
         "error": "⚠️ An error occurred. Please try again.",
         "reset_done": "🔄 Conversation cleared!",
         "next_action": "Choose next action:",
+        "sub_required": "⚠️ To use this bot, please subscribe to our channel first!\n\nAfter subscribing, press the ✅ button.",
+        "sub_success": "✅ Great! Now you can use the bot.\n\nPress /start.",
+        "sub_fail": "❌ You haven't subscribed yet!",
         "help": "📖 Commands:\n\n/start - Start bot\n/reset - Clear chat\n/help - Help\n\nButtons:\n💡 Startup Idea - 3-question idea flow\n📊 Analyze - Rate your idea\n🗺 Roadmap - 6-month plan\n💬 Free Chat - Ask anything",
     }
 }
-
+ 
 def get_menu_keyboard(lang: str):
     menu = TEXTS[lang]["menu"]
     return ReplyKeyboardMarkup([[menu[0], menu[1]], [menu[2], menu[3]]], resize_keyboard=True)
-
+ 
 # ===================== HANDLERS =====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user(update.message.from_user.id)
+    user_id = update.message.from_user.id
+ 
+    # Obuna tekshirish
+    is_sub = await check_subscription(user_id, context.bot)
+    if not is_sub:
+        lang = context.user_data.get("lang", "uz")
+        await update.message.reply_text(
+            TEXTS[lang]["sub_required"],
+            reply_markup=get_sub_keyboard(lang)
+        )
+        return ConversationHandler.END
+ 
     keyboard = [["🇺🇿 O'zbek", "🇬🇧 English"]]
     await update.message.reply_text(
         TEXTS["uz"]["welcome"],
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
     )
     return LANG
-
+ 
+async def check_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    lang = context.user_data.get("lang", "uz")
+ 
+    is_sub = await check_subscription(user_id, context.bot)
+    if is_sub:
+        await query.edit_message_text(TEXTS[lang]["sub_success"])
+    else:
+        await query.answer(TEXTS[lang]["sub_fail"], show_alert=True)
+ 
 async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text
     lang = "en" if "English" in text else "uz"
     context.user_data["lang"] = lang
-
+ 
     if user_id in conversation_history:
         del conversation_history[user_id]
-
+ 
     await update.message.reply_text(
         TEXTS[lang]["start"],
         reply_markup=get_menu_keyboard(lang)
     )
     return MENU
-
+ 
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     lang = context.user_data.get("lang", "uz")
     menu = TEXTS[lang]["menu"]
-
+ 
     if text not in menu:
         context.user_data["mode"] = "chat"
         result = ask_ai(update.message.from_user.id, text, lang)
         await update.message.reply_text(result)
         return MENU
-
+ 
     if text == menu[0]:
         context.user_data["idea_step"] = 1
         context.user_data["idea_data"] = {}
         context.user_data["mode"] = "idea"
         await update.message.reply_text(TEXTS[lang]["idea_q1"], reply_markup=ReplyKeyboardRemove())
         return IDEA_FLOW
-
+ 
     elif text == menu[1]:
         context.user_data["mode"] = "analyze"
         msg = "Write your startup idea to analyze:" if lang == "en" else "Tahlil qilish uchun startup ideangizni yozing:"
         await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove())
         return IDEA_FLOW
-
+ 
     elif text == menu[2]:
         context.user_data["mode"] = "roadmap"
         msg = "Write your startup idea for roadmap:" if lang == "en" else "Yo'l xaritasi uchun startup ideangizni yozing:"
         await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove())
         return IDEA_FLOW
-
+ 
     else:
         context.user_data["mode"] = "chat"
         msg = "Ask me anything about startups! 💬" if lang == "en" else "Startup haqida xohlagan savolingizni bering! 💬"
         await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove())
         return IDEA_FLOW
-
+ 
 async def idea_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text
     lang = context.user_data.get("lang", "uz")
     mode = context.user_data.get("mode", "chat")
     step = context.user_data.get("idea_step", 0)
-
+ 
     await update.message.reply_text(TEXTS[lang]["generating"])
-
+ 
     try:
         if mode == "analyze":
             if lang == "en":
@@ -222,7 +274,7 @@ async def idea_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result = ask_ai_once(prompt, lang)
             await update.message.reply_text(header + result)
             return await back_to_menu(update, context)
-
+ 
         elif mode == "roadmap":
             if lang == "en":
                 prompt = f"Create a 6-month roadmap for this startup:\n{text}\n\nFor each month: 3 main tasks, KPI metric, estimated budget.\nMonths: PREPARATION, MVP BUILD, TESTING, LAUNCH, GROWTH, SCALE"
@@ -233,7 +285,7 @@ async def idea_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result = ask_ai_once(prompt, lang)
             await update.message.reply_text(header + result)
             return await back_to_menu(update, context)
-
+ 
         elif mode == "idea":
             if step == 1:
                 context.user_data["idea_data"]["industry"] = text
@@ -261,22 +313,22 @@ async def idea_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["idea_step"] = 0
                 context.user_data["mode"] = "chat"
                 return await back_to_menu(update, context)
-
+ 
         else:
             result = ask_ai(user_id, text, lang)
             await update.message.reply_text(result)
             return IDEA_FLOW
-
+ 
     except Exception as e:
         logging.error(f"Xato: {e}")
         await update.message.reply_text(TEXTS[lang]["error"])
         return IDEA_FLOW
-
+ 
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = context.user_data.get("lang", "uz")
     await update.message.reply_text(TEXTS[lang]["next_action"], reply_markup=get_menu_keyboard(lang))
     return MENU
-
+ 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id in conversation_history:
@@ -285,11 +337,11 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text(TEXTS[lang]["reset_done"])
     return await start(update, context)
-
+ 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = context.user_data.get("lang", "uz")
     await update.message.reply_text(TEXTS[lang]["help"])
-
+ 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         await update.message.reply_text("Sizda bu huquq yo'q.")
@@ -307,7 +359,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             failed += 1
     await update.message.reply_text(f"✅ Yuborildi: {sent} ta\n❌ Yuborilmadi: {failed} ta\n👥 Jami: {len(users)} ta")
-
+ 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         await update.message.reply_text("Sizda bu huquq yo'q.")
@@ -318,11 +370,11 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 Jami foydalanuvchilar: {len(users)} ta\n"
         f"💬 Hozir faol: {len(conversation_history)} ta"
     )
-
+ 
 # ===================== MAIN =====================
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
+ 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -337,14 +389,16 @@ def main():
         ],
         allow_reentry=True
     )
-
+ 
     app.add_handler(conv_handler)
+    app.add_handler(CallbackQueryHandler(check_sub_callback, pattern="^check_sub$"))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("help", help_command))
-
+ 
     print("✅ Startup Mind Bot ishga tushdi!")
     app.run_polling(drop_pending_updates=True)
-
+ 
 if __name__ == "__main__":
     main()
+ 
