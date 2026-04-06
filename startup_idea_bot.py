@@ -20,7 +20,7 @@ logging.basicConfig(
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@your_channel")
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@life_chronicles_19")
  
 USERS_FILE = "users.json"
 conversation_history = {}
